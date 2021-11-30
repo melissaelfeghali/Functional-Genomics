@@ -1,0 +1,691 @@
+---
+title: "BIF425 - Functional Genomics: Project 1"
+author: "Melissa El Feghali"
+date: "10/13/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true 
+    theme: flatly
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#  Introduction 
+
+In this article, we introduce a complete workflow for a (Affymetrix) microarray analysis. Data import, preprocessing, differential expression and enrichment analysis are discussed.
+
+The data set used is from a paper studying the expression profile of human lymphatic endothelial cells under static or oscillatory shear stress conditions in the presence or absence of the Forkhead box protein C2 (FOXC2).
+
+4 samples cultured under static conditions and 4 samples under oscillatory shear stress were tested. Our aim is to analyze whether FOXC2 regulates responses to disturbed flow, thus we studied LECs cultured under static or oscillatory flow conditions, which mimic disturbed flow.  
+
+#  Workflow package installation 
+
+In our Affymetrix micro-array differential expression workflow, we will use a Bioconductor package called "maEndToEnd". 
+
+##  Workflow package installation from Bioconductor 
+
+The above-mentioned package can be installed via the BiocManager. 
+```{r}
+if (!require("BiocManager"))
+    install.packages("BiocManager")
+#BiocManager::install("maEndToEnd", version = "devel")
+```
+
+##  Workflow package installation from Github 
+
+```{r}
+#install.packages("devtools")
+library(devtools)
+
+#devtools::install_github("r-lib/remotes")
+library(remotes)
+packageVersion("remotes") # has to be 1.1.1.9000 or later
+
+#remotes::install_github("b-klaus/maEndToEnd", ref="master")
+```
+
+##  List of packages required for the workflow 
+
+Below, is the list of all the packages that are required by the workflow. We use a call to library() in order to load them. 
+
+```{r}
+#General Bioconductor packages
+    library(Biobase)
+    library(oligoClasses)
+     
+#Annotation and data import packages
+    library(ArrayExpress)
+    library(pd.hugene.1.0.st.v1)
+    library(hugene10sttranscriptcluster.db)
+     
+#Quality control and pre-processing packages
+    library(oligo)
+    library(arrayQualityMetrics)
+     
+#Analysis and statistics packages
+    library(limma)
+    library(topGO)
+    library(ReactomePA)
+    library(clusterProfiler)
+     
+#Plotting and color options packages
+    library(gplots)
+    library(ggplot2)
+    library(geneplotter)
+    library(RColorBrewer)
+    library(pheatmap)
+     
+#Formatting/documentation packages
+   #library(rmarkdown)
+   #library(BiocStyle)
+    library(dplyr)
+    library(tidyr)
+
+#Helpers:
+    library(stringr)
+    library(matrixStats)
+    library(genefilter)
+    library(openxlsx)
+   #library(devtools)
+```
+
+# Downloading the raw data from ArrayExpress 
+
+As a first step in our analysis, we need to download the raw data CEL files. The data is available at https://www.ebi.ac.uk/arrayexpress/ with the following accession code : E-GEOD-60152.  
+
+We will store these files in the directory raw_data_dir that we will create in a specified location of our choice. 
+
+```{r}
+raw_data_dir <- "~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/Project_1/"
+
+if(!dir.exists(raw_data_dir)) {
+  dir.create(raw_data_dir)
+}
+```
+
+We use the getAE function from the ArrayExpress Bioconductor package to obtain the ftp links to the raw data files. We save the date in the raw_data_dir created above. We get a list of the names of the downloaded files. 
+```{r}
+anno_AE <- getAE("E-GEOD-60152", path = raw_data_dir, type = "raw")
+```
+# Import of annotation data and microarray expression data as "ExpressionSet" 
+
+First, we store the SDRF file's path in sdrf_location. Then, in order to get the sample annotation, we import the SDRF file from the raw data folder using the read.delim function. 
+```{r}
+sdrf_location <- file.path(raw_data_dir, "E-GEOD-60152.sdrf.txt")
+SDRF <- read.delim(sdrf_location)
+```
+
+We get the row names of the SDRF file from the column Array.Data.File of the SDRF table data in order to give the row names the sample names (or ID) instead of the sample index. 
+```{r}
+rownames(SDRF) <- SDRF$Array.Data.File
+
+# Turn the SDRF table into an AnnotatedDataFrame from the Biobase package 
+SDRF <- AnnotatedDataFrame(SDRF)
+```
+
+Now, we create the Expression Set object raw_data and import our CEL files.
+```{r}
+raw_data <- oligo::read.celfiles(filenames = SDRF$Array.Data.File, verbose = FALSE, phenoData = SDRF)
+
+# Check if all the data set was read correctly or not 
+stopifnot(validObject(raw_data))
+```
+We use the pData function to access the phenoData in our ExpressionSet. 
+```{r}
+# We can directly view the whole table without using the head() function since we only have a total of 8 rows
+(Biobase::pData(raw_data))
+```
+We have to sub-select the following columns of interest for us : 
+
+1. Identifiers of the individuals "Source.Name" and "Assay.Name"
+2. Transfection "FactorValue..transfection."
+3. Treatment "FactorValue..treatment."
+
+```{r}
+Biobase::pData(raw_data) <- Biobase::pData(raw_data) [, c("Source.Name", "Assay.Name", "FactorValue..transfection.", "FactorValue..treatment.")]
+```
+
+# Quality control of the raw data {.tabset .tabset-fade .tabset-pills}
+
+In this step, we check for outliers and try to see whether the data clusters as expected. 
+
+By using the function exprs(raw_data), we can access the expression intensity values stored in the assayData sub-object "exprs". 
+```{r}
+Biobase::exprs(raw_data)[1:5,]
+```
+We analyze the data on a logarithmic scale using log2 for quality control. 
+```{r}
+exp_raw <- log2(Biobase::exprs(raw_data))
+```
+
+## Principle Component Analysis (PCA)
+
+We perform a PCA which requires the expression data to be by column and not by row; this is why we have to transpose. In the PCA, every column which represented a sample will have the probes in and every row that had the probes will have the sample. 
+```{r}
+PCA_raw <- prcomp(t(exp_raw), scale. = FALSE) # We do not need to scale since we already did the log2 transformation 
+```
+
+```{r}
+percentVar <- round(100*PCA_raw$sdev^2/sum(PCA_raw$sdev^2),1)
+
+# standard differentiation ratio
+sd_ratio <- sqrt(percentVar[2]/percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA_raw$x[,1], PC2 = PCA_raw$x[,2], Transfection = pData(raw_data)$FactorValue..transfection., Treatment = pData(raw_data)$FactorValue..treatment.)
+```
+
+We now plot the PCA. Every point represents one sample, with the color indicating the response to the treatment and the shape the disease. 
+```{r}
+ggplot(dataGG, aes(PC1, PC2)) + geom_point(aes(shape = Transfection, colour = Treatment)) + ggtitle("PCA plot of the log-transformed raw expression data") + xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) + ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) + theme(plot.title = element_text(hjust = 0.4))+ coord_fixed(ratio = sd_ratio) + scale_shape_manual(values = c(4,10)) + scale_color_manual(values = c("firebrick1", "dodgerblue1"))
+```
+
+The PCA plot of the raw data shows that the second principal component differentiates between the treatments. This means that the treatment type could be an important driver of gene expression differences. 
+
+## Boxplot 
+
+Additionally, we generate a boxplot to represent the probe intensities with one box per individual microarray. 
+
+```{r}
+# We can use raw_data here because the oligo::boxplot function can take expression sets as argument and performs a log2-transformation by default. 
+oligo::boxplot(raw_data, target = "core", main = "Boxplot of log2-intensitites for the raw data")
+```
+After looking at the boxplot, we notice that the intensity distributions of the individual arrays differ and thus need an appropriate normalization. 
+
+## Quality Metrics 
+
+We generate an html report, containing more elaborate quality control plots along with a description of their aims and an identification of possible outliers. 
+```{r}
+arrayQualityMetrics(expressionset = raw_data,
+    outdir = "~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/Project_1/",
+    force = TRUE, do.logtransform = TRUE,
+    intgroup = c("FactorValue..transfection.", "FactorValue..treatment."))
+```
+# Background adjustment, calibration, summarization and annotation {.tabset .tabset-fade .tabset-pills}
+
+## Backgroung adjustment 
+
+This is an essential step in the processing of microarray data due to the fact that a proportion of the measured probe intensities are the result of non-specific hybridization and the noise in the optimal detection system. Thus, observed intensities need to be adjusted to give accurate measurements of specific hybridization.
+
+## Calibration 
+
+This step, also known as across-array normalization, is needed in order to be able to compare measurements from different array hybridization due to many obscuring sources of variations.
+
+## Summarization 
+
+After normalization, summarization is necessary to be done because on the Affymetrix platform, transcripts are represented by multiple probes, that is multiple locations on the array. For each gene, the background-adjusted and normalized intensities of all probes need to be summarized into one quantity that estimates an amount proportional to the amount of RNA transcript.
+
+## Annotation 
+
+After the summarization step, the summarized data can be annotated with various information, e.g. gene symbols and ENSEMBL gene identifiers.
+
+# Relative Log Expression data quality analysis 
+
+Relative log expression (RLE) plots are a simple, yet powerful, tool fo visualizing unwanted variation in data. We perform an RMA without prior normalization : 
+```{r}
+sabine_eset <- oligo::rma(raw_data, target = "core", normalize = FALSE)
+```
+
+To perform the RLE, we calculate the median log2 intensity of every transcript across all arrays. In order to do this, we calculate the row medians of exprs(sabine_est). 
+
+The output data of the RMA function is in log2 scale by default, thus we do not have to apply log2 manually.
+```{r}
+row_medians_assayData <- Biobase::rowMedians(as.matrix(Biobase::exprs(sabine_eset)))
+
+# Subtract the transcript median intensity from every transcript intensity using the sweep function 
+RLE_data <- sweep(Biobase::exprs(sabine_eset), 1, row_medians_assayData)
+
+# Reshape the data into a format that we can use to generate a boxplot for each array
+RLE_data <- as.data.frame(RLE_data)
+RLE_data_gathered <- tidyr::gather(RLE_data, patient_array, log2_expression_deviation)
+```
+
+Let's keep in mind that the boxplot we are generating is using data that has only been background corrected. 
+```{r}
+ggplot2::ggplot(RLE_data_gathered, aes(patient_array, log2_expression_deviation)) + geom_boxplot(outlier.shape = NA) + ylim(c(-2, 2)) + theme(axis.text.x = element_text(colour = "chartreuse3", angle = 60, size = 6.5, hjust = 1 , face = "bold"))
+```
+
+After inspecting the boxplot, we can consider one array to be an outlier : GSM1466653_osc_siAs_C9 is positively y-shifted. This indicates a systematically higher expression of the majority of transcripts in comparison to most of the other arrays. This could be caused by quality issues or batch effects. 
+
+When the shape and median of a given box varies too much from the bulk, they should be inspected and potentially removed. Arrays that are confirmed to be outliers by heatmap cluster analysis later on, could be removed for subsequent analysis. 
+
+# RMA calibration of the data {.tabset .tabset-fade .tabset-pills}
+
+In this part, we will run a manually generated code that performs the quantile normalization step. Then we will run a built in normalization step and compare the two results.
+ 
+First, we will generate the background corrected data to pass it on as an argument in the following step. 
+```{r}
+library(preprocessCore)
+bcorrected_data <- rma.background.correct(exprs(raw_data))
+```
+
+## Manual Function of Quantile Normalization 
+```{r}
+quantile_normalization <- 
+  
+  function(bg_corrected_data){
+    # bg_corrected data = Background Corrected Data: bcorrected_data
+    
+    # For ranking, sorting, accessing and manipulating rows and columns:
+    # We focus on using apply() family methods instead of for loops to optimize speed
+    
+    # ranked cols matrix: Contains Expressions-> Ranks in their matrix
+    ranked_cols_matrix <- apply(bg_corrected_data,2, rank,ties.method="min")
+    
+    # we can use apply(data,2,sort) to get the sorted matrix by columns
+    sorted_cols_matrix <- apply(bg_corrected_data, 2, sort)
+    
+    # Get the mean of every row in the sorted_cols_matrix
+    means_by_row <- rowMeans(sorted_cols_matrix)
+    
+    # Function replace_w_medians: Replaces all the exprs with the same rank with the medians of their rank
+    replace_w_medians <- function(column, medians){
+      # Rank-Frequency table: Gets all repeated expressions and their frequency
+      rank_freq <- data.frame(table(column))
+      rank_freq <- as.matrix(rank_freq)
+      
+      # Function to update row medians into row medians but column specific, check below for more...
+      update_median <- function(rf, med){
+        new_median <- rep(mean(med[as.integer(rf[1]):(as.integer(rf[1])+as.integer(rf[2])-1)]),rf[2])
+        return (new_median)
+      }
+      # All Repeated Ranks will influence the medians => replace the medians with average of medians
+      new_medians <- apply(rank_freq,1, update_median, med=means_by_row)
+      new_medians <- unlist(new_medians)
+      
+      # Index to mean function: Replace all values with rank x with average median of the same rank
+      index_to_mean <- function(my_index, my_mean){
+        return(my_mean[my_index])
+      }
+      # Apply index_to_mean on column X
+      final_result <- lapply(column, index_to_mean, my_mean=new_medians)
+      final_result <- unlist(final_result)
+      return(final_result)
+    }
+    
+    # Apply replace_w_medians to every column of the matrix:
+    final_result  <- apply(ranked_cols_matrix,2,replace_w_medians, medians=means_by_row)
+    
+    
+    # Return Final Result
+    return(final_result)
+  }
+
+```
+
+```{r}
+manual_result <- quantile_normalization(bcorrected_data)
+head(manual_result)
+```
+
+## Built-in Function 
+
+```{r}
+builtin_result <- normalize.quantiles(bcorrected_data)
+head(builtin_result)
+```
+
+## Comparison between the Functions 
+
+```{r}
+head(builtin_result - manual_result)
+```
+
+By comparing the two Quantile Normalization functions, we notice that little or no difference is presence between the results. 
+
+## Full RMA algorithm 
+
+We will now perform the full RMA algorithm that includes background correction, normalization and summarization. 
+```{r}
+sabine_eset_norm <- oligo::rma(raw_data, target = "core")
+```
+
+The results obtained in our RMA and the one in the processed data deffer slightly. This might be due to the fact that the data was corrected for batch effect with the COMBAT method before being normalized. 
+
+# Quality Assessment of the calibrated data {.tabset .tabset-fade .tabset-pills}
+
+## PCA Analysis 
+
+We perform a PCA analysis of the calibrated data, analogously to the one with the raw data. 
+```{r}
+exp_sabine <- Biobase::exprs(sabine_eset_norm)
+PCA <- prcomp(t(exp_sabine), scale = FALSE)
+
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], Transfection = Biobase::pData(sabine_eset_norm)$FactorValue..transfection., Treatment = Biobase::pData(sabine_eset_norm)$FactorValue..treatment.)
+
+ggplot(dataGG, aes(PC1, PC2)) + geom_point(aes(shape = Transfection, colour = Treatment)) + ggtitle("PCA plot of the calibrated, summarized data") + xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) + ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) + theme(plot.title = element_text(hjust = 0.5)) + coord_fixed(ratio = sd_ratio) + scale_shape_manual(values = c(4,10)) + scale_color_manual(values = c("firebrick1", "dodgerblue1"))
+```
+In comparison to the first PCA analysis before RMA, we notice that the first principle component differentiates now between the treatments. This indicates that now differential expression between the treatments is the dominant source of variation. Note that the second principal component separates between the transfections. 
+
+## Heatmap Clustering Analysis 
+
+We will plot a heatmap with the sample-to-sample distances with the sample names as row-names. We want to see how well the samples cluster for transfection (control or FOXC2) and treatment (OSS or static), respectively. 
+```{r}
+transfection_names <- ifelse(str_detect(pData(sabine_eset_norm)$FactorValue..transfection.,"FOXC2 siRNAs"), "FOXC2", "control")
+
+treatment_names <- ifelse(str_detect(pData(sabine_eset_norm)$FactorValue..treatment.,"static"), "static", "OSS")
+
+annotation_for_heatmap <- data.frame(Transfection = transfection_names,  Treatment = treatment_names)
+
+row.names(annotation_for_heatmap) <- row.names(pData(sabine_eset_norm))
+```
+
+```{r}
+# Compute the sample-to-sample distances
+dists <- as.matrix(dist(t(exp_sabine), method = "manhattan")) # we transpose the expression values
+
+rownames(dists) <- row.names(pData(sabine_eset_norm))
+hmcol <- rev(colorRampPalette(RColorBrewer::brewer.pal(10, "PuBu"))(255))
+colnames(dists) <- NULL
+diag(dists) <- NA
+
+ann_colors <- list(Transfection = c(FOXC2 = "aquamarine1", control = "blue2"), Treatment = c(static = "darkorchid1", OSS = "darkslateblue")
+                   )
+pheatmap(dists, col = (hmcol), annotation_row = annotation_for_heatmap, annotation_colors = ann_colors, legend = TRUE, treeheight_row = 0, legend_breaks = c(min(dists, na.rm = TRUE), max(dists, na.rm = TRUE)), legend_labels = (c("small distance", "large distance")), main = "Clustering heatmap for the calibrated samples")
+```
+
+On the heatmap, we see that the samples cluster more strongly by treatment, confirming the impression from the PCA plot. 
+
+# Filtering based on intensity 
+
+We now filter out lowly expressed genes. We will perform a “soft” intensity based filtering here, since this is recommended by the limma, used in the experiment. 
+
+For intensity-based filtering, we calculate the row-wise medians from the expression data, as they represent the transcript medians, and assign them to sabine_medians. From this we create a histogram:
+```{r}
+sabine_medians <- rowMedians(Biobase::exprs(sabine_eset_norm))
+
+hist_res <- hist(sabine_medians, 100, col = "darkorchid1", freq = FALSE, main = "Histogram of the Median Intensities", border = "antiquewhite4", xlab = "Median intensities")
+```
+In the histogram above, we can see, on the far left hand side, a small enrichment of low medians. These represent the genes we want to filter;  we visually set a cutoff line man_threshold to the left of the histogram peak in order to exclude genes. 
+
+We plot the same histogram as before and add the threshold line with the abline() function. 
+```{r}
+man_threshold <- 2.3
+
+hist_res <- hist(sabine_medians, 100, col = "darkorchid1", freq = FALSE, main = "Histogram of the median intensities", border = "antiquewhite4", xlab = "Median intensities")
+
+abline(v = man_threshold, col = "chartreuse", lwd = 4)
+```
+Transcripts that do not have intensities larger than the threshold in at least as many arrays as the smallest experimental group are excluded.
+
+In order to do so, we first have to get a list with the number of samples in the experimental groups:
+```{r}
+no_of_samples <- table(paste0(pData(sabine_eset_norm)$FactorValue..transfection., "_", pData(sabine_eset_norm)$FactorValue..treatment.))
+no_of_samples 
+```
+
+```{r}
+samples_cutoff <- min(no_of_samples)
+
+# Evaluates whether the number of arrays where the median intensity passes the threshold is greater than the samples_cutoff and returns TRUE or FALSE for each row
+idx_man_threshold <- apply(Biobase::exprs(sabine_eset_norm), 1, function(x){ sum(x > man_threshold) >= samples_cutoff})
+
+# Table that summarizes the results and gives an overview over how many genes are filtered out 
+table(idx_man_threshold)
+```
+
+We subset our expression set to sabine_manfiltered and keep the TRUE elements of idx_man_threshold
+```{r}
+sabine_manfiltered <- subset(sabine_eset_norm, idx_man_threshold)
+```
+
+# Annotation of the transcript clusters 
+
+We add “feature data” - annotation information to the transcript cluster identifiers stored in the featureData of our ExpressionSet.
+```{r}
+# We used the function select to query the gene symbols and associated short descriptions for the transcript clusters
+anno_sabine <- AnnotationDbi::select(hugene10sttranscriptcluster.db, keys = (featureNames(sabine_manfiltered)), columns = c("SYMBOL", "GENENAME"), keytype = "PROBEID")
+
+anno_sabine <- subset(anno_sabine, !is.na(SYMBOL))
+```
+
+Now, we need to filter out the probes that do not map to a gene, in other words, that do not have a gene symbol assigned.
+
+We compute a summary table to see how many transcript-cluster identifiers map to multiple gene symbols. 
+```{r}
+# Group anno_sabine by their PROBEID
+anno_grouped <- group_by(anno_sabine, PROBEID)
+
+# Summarize the groups and indicate the number of different genes assigned to a transcript cluster
+anno_summarized <- dplyr::summarize(anno_grouped, no_of_matches = n_distinct(SYMBOL))
+
+head(anno_summarized)
+```
+
+In the step below, we filter the PROBEIDs with multiple matches: 
+```{r}
+anno_filtered <- filter(anno_summarized, no_of_matches > 1)
+head(anno_filtered)
+```
+```{r}
+probe_stats <- anno_filtered 
+
+nrow(probe_stats)
+```
+
+We have close to 2200 transcript clusters that map to multiple gene symbols. Seeing that it is difficult to decide which mapping is "correct", we exclude these transcript clusters. 
+
+```{r}
+# Assign probe IDs with multiple mappings to the variable ids_to_exclude 
+ids_to_exlude <- (featureNames(sabine_manfiltered) %in% probe_stats$PROBEID)
+
+table(ids_to_exlude)
+```
+```{r}
+# Generate an expression set without ids_to_exclude 
+sabine_final <- subset(sabine_manfiltered, !ids_to_exlude)
+validObject(sabine_final)
+```
+
+Now that we have just excluded probe IDs from the assay data, we also have to also exclude them from the feature data anno_sabine. 
+```{r}
+head(anno_sabine)
+```
+```{r}
+# Generate a column PROBEID in fData(sabine_final) and assign the row names of fData(sabine_final) to it
+fData(sabine_final)$PROBEID <- rownames(fData(sabine_final))
+```
+```{r}
+# left-join keeps the rows and columns of the first argument and adds the corresponding column entries of the second argument
+fData(sabine_final) <- left_join(fData(sabine_final), anno_sabine)
+```
+
+```{r}
+# Restore rownames after left_join
+rownames(fData(sabine_final)) <- fData(sabine_final)$PROBEID 
+validObject(sabine_final)
+```
+
+# Linear Models
+
+For the subsequent linear modeling of the data, we introduce the abbreviations “Stat” and “OSS” for the treatment types, and “Ctrl” and “FOXC2” for the transfections, respectively:
+```{r}
+treatment <- str_replace_all(Biobase::pData(sabine_final)$FactorValue..treatment.,
+                  " ", "_")
+
+treatment <- ifelse(treatment == "static",
+                 "Stat", "OSS")
+
+transfection <- 
+  str_replace_all(Biobase::pData(sabine_final)$FactorValue..transfection.,
+                  " ", "_")
+transfection <- 
+  ifelse(str_detect(Biobase::pData(sabine_final)$FactorValue..transfection., 
+                    "control"), "Ctrl", "FOXC2")
+```
+
+```{r}
+design_sabine = model.matrix(~ 0 + pData(sabine_final)$FactorValue..treatment)
+colnames(design_sabine)[1:2] <- c("Stat", "OSS")
+rownames(design_sabine) <- Biobase::pData(sabine_final)$Source.Name
+
+contrast_matrix <- makeContrasts(Stat-OSS, levels = design_sabine)
+sabine_fit <- eBayes(contrasts.fit(lmFit(sabine_final,
+                                design = design_sabine),
+                                contrast_matrix))
+```
+
+## Extracting results 
+
+Finally, we extract the number of deferentially expressed genes. We extract the results for both static and oscillatory shear stress, and the results are sorted by their absolute t-statistics.
+```{r}
+table_OSS <- topTable(sabine_fit, number = Inf)
+head(table_OSS)
+```
+
+```{r}
+hist(table_OSS$P.Value, col = brewer.pal(3, name = "Set1")[1], main = "Static Condition vs. Oscillatory Shear Stress", xlab="p-values")
+```
+
+## Multiple testing FDR, and comparison with results from the original paper
+
+```{r}
+nrow(subset(table_OSS, P.Value < 0.05))
+```
+
+```{r}
+tail(subset(table_OSS, P.Value< 0.001))
+```
+
+```{r}
+total_genenumber_OSS <- length(subset(table_OSS, P.Value < 0.05)$SYMBOL)
+```
+
+## Visualization of DE analysis results - volcano plot
+
+For a visualization of the deferentially expressed genes, we create a volcano plot, which is commonly used to summarize the results of a differential expression analysis in a single figure.
+```{r}
+volcano_names = ifelse(abs(sabine_fit$coefficients)>=1, sabine_fit$genes$SYMBOL, NA)
+
+volcanoplot(sabine_fit, coef = 1L, style = "p-value", highlight = 100, names = volcano_names, xlab = "Log2 Fold Change", ylab = NULL, pch = 16, cex = 0.35)
+```
+
+# Gene Ontology (GO) based Enrichment Analysis 
+
+We create tables with deferentially expressed genes for Stat and OSS, respectively, and choose an FDR cutoff of 5%, similar to what they did in the paper. Here, we focus on the OSS subset of the data. 
+```{r}
+#DE_genes_OSS <- subset(table_OSS, adj.P.Val < 0.1)$PROBEID
+```
+
+## Matching the background set of genes 
+
+For every deferentially expressed gene, we try to find genes with similar expression with genefinder. The genefinder function returns a list with two elements for each gene: one with the indices of the background genes found and one with the distances to the DE-genes. 
+```{r}
+#back_genes_idx <- genefilter::genefinder(sabine_final, as.character(DE_genes_OSS), method = "manhattan", scale = "none")
+```
+
+We extract the PROBEIDs, which correspond to the indices.
+```{r}
+#back_genes_idx <- sapply(back_genes_idx, function(x)x$indices)
+```
+
+We then create a vector back_genes containing all background gene PROBEID.
+```{r}
+#back_genes <- featureNames(palmieri_final)[back_genes_idx]
+#back_genes <- setdiff(back_genes, DE_genes_OSS)
+
+    
+#intersect(back_genes, DE_genes_OSS)
+```
+```{r}
+#length(back_genes)
+```
+
+We create a multi-density plot with mean expression on the x-axis and curves for all genes, foreground genes and background genes, respectively.
+```{r}
+#multidensity(list( all = table_OSS[,"AveExpr"] ,fore = table_OSS[DE_genes_OSS , "AveExpr"], back = table_OSS[rownames(table_OSS) %in% back_genes, "AveExpr"]), col = c("#e46981", "#ae7ee2", "#a7ad4a"), xlab = "mean expression", main = "DE genes for OSS-background-matching")
+```
+
+## Running topGO 
+
+First, we create a named vector all_genes with all genes to be analyzed: DE-genes and background gene.
+```{r}
+#gene_IDs <- rownames(table_OSS)
+#in_universe <- gene_IDs %in% c(DE_genes_OSS, back_genes)
+#in_selection <- gene_IDs %in% DE_genes_OSS 
+
+#all_genes <- in_selection[in_universe]
+#all_genes <- factor(as.integer(in_selection[in_universe]))
+#names(all_genes) <- gene_IDs[in_universe] 
+```
+
+We now initialize the topGO data set, using the GO annotations contained in the annotation data base for the chip we are using.
+```{r}
+#top_GO_data <- new("topGOdata", ontology = "BP", allGenes = all_genes, nodeSize = 10, annot = annFUN.db, affyLib = "hugene10sttranscriptcluster.db")
+```
+
+```{r}
+#result_top_GO_elim <- runTest(top_GO_data, algorithm = "elim", statistic = "Fisher")
+#result_top_GO_classic <- runTest(top_GO_data, algorithm = "classic", statistic = "Fisher")
+```
+
+```{r}
+#res_top_GO <- GenTable(top_GO_data, Fisher.elim = result_top_GO_elim, Fisher.classic = result_top_GO_classic, orderBy = "Fisher.elim" , topNodes = 100)
+
+#genes_top_GO <- printGenes(top_GO_data, whichTerms = res_top_GO$GO.ID, chip = "hugene10sttranscriptcluster.db", geneCutOff = 1000)
+
+#res_top_GO$sig_genes <- sapply(genes_top_GO, function(x){ str_c(paste0(x[x$'raw p-value' == 2, "Symbol.id"],";"), collapse = "")})
+
+#head(res_top_GO[,1:8], 20)
+```
+
+# A pathway enrichment analysis using reactome
+
+The package ReactomePA requires entrez identifiers, so we convert our PROBEIDs to entrez identifiers using the function mapIDs.
+```{r}
+entrez_ids <- mapIds(hugene10sttranscriptcluster.db, keys = rownames(table_OSS), keytype = "PROBEID", column = "ENTREZID")
+```
+
+```{r}
+#reactome_enrich <- enrichPathway(gene = entrez_ids[DE_genes_OSS], universe = entrez_ids[c(DE_genes_OSS, back_genes)], organism = "human", pvalueCutoff = 0.05, qvalueCutoff = 0.9, readable = TRUE)
+
+#reactome_enrich@result$Description <- paste0(str_sub(reactome_enrich@result$Description, 1, 20), "...")
+
+#head(as.data.frame(reactome_enrich))[1:6]
+```
+
+## Visualizing the reactome based analysis results 
+
+The top pathways can be displayed as a bar chart that displays all categories with a p-value below the specified cutoff.
+```{r}
+#barplot(reactome_enrich)
+```
+
+The “enrichment map” displays the results of the enrichment analysis as a graph, where the color represents the p-value of the pathway and the edge-thickness is proportional to the number of overlapping genes between two pathways.
+```{r}
+#emapplot(reactome_enrich, showCategory = 10)
+```
+
+# Session information 
+
+We call the function sessionInfo, which reports the version numbers of R and all the packages used in this session.
+
+```{r}
+gc()
+```
+```{r}
+length(getLoadedDLLs())
+```
+```{r}
+sessionInfo()
+```
+
+# References
+
+1. Sabine, A., Bovay, E., Demir, C. S., Kimura, W., Jaquet, M., Agalarov, Y., Zangger, N., Scallan, J. P., Graber, W., Gulpinar, E., Kwak, B. R., Mäkinen, T., Martinez-Corral, I., Ortega, S., Delorenzi, M., Kiefer, F., Davis, M. J., Djonov, V., Miura, N., & Petrova, T. V. (2015). FOXC2 and fluid shear stress stabilize postnatal lymphatic vasculature. The Journal of clinical investigation, 125(10), 3861–3877. https://doi.org/10.1172/JCI80454
+
+2. Athar A. et al., 2019. ArrayExpress update - from bulk to single-cell expression data. Nucleic Acids Res, doi: 10.1093/nar/gky964. Pubmed ID 30357387.
+
+3. Irizarry RA, Hobbs B, Collin F, Beazer-Barclay YD, Antonellis KJ, Scherf U, et al. Exploration, normalization, and summaries of high density oligonucleotide array probe level data. Biostatistics. 2003;4:249–64.
+
+4. Irizarry RA. Summaries of affymetrix GeneChip probe level data. Nucleic Acids Research [Internet]. 2003 Feb;31(4):15e–15. Available from: http://dx.doi.org/10.1093/nar/gng015
+
+5. Microarray data are available in the ArrayExpress database (http://www.ebi.ac.uk/arrayexpress) under accession number E-GEOD-60152."

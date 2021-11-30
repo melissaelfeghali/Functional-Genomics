@@ -1,0 +1,95 @@
+---
+title: "Process VCF Files"
+author: "Melissa El Feghali"
+date: "12/2/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true 
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load pacakge 
+
+```{r}
+library(vcfR)
+```
+
+# Read a VCF file
+```{r}
+path <- "~/Downloads/lumpy.vcf"
+vcf = read.vcfR(path, verbose = FALSE )
+```
+
+Example vcf from package
+```{r}
+data(vcfR_test)
+```
+
+# Get the metadata
+```{r}
+vcf@meta
+```
+
+# Get Fixed fields
+```{r}
+vcf@fix
+```
+
+# Get Optional Fields
+```{r}
+vcf@gt
+```
+
+```{r}
+vcf@fix[1,]
+```
+
+
+# Checking fields
+```{r}
+#vcf@fix[i, keyword]
+
+#i: variant index
+
+#keyword:
+#"CHROM":chromosome
+#POS: position on chromosome
+#ID: rsid (SNP)
+#REF
+#ALT
+#QUAL: Mappping Quality
+#FILTER: PASS/q10
+#INFO: Info in metadata
+```
+
+```{r}
+#Depends on the specific file, how to access individual INFO sections
+t=unlist(strsplit(vcf@fix[1,"INFO"], ";"))
+t
+spec=t["INFO11"]
+spec
+cri=unlist(strsplit(spec, "="))
+cri[2] #to get the number itself
+```
+
+```{r}
+#Writing a text file
+info=cbind(vcf@fix[1,],vcf@gt[1,])
+info=toString(info)
+rm(vect)
+vect=append(vcf@meta, info)
+vect
+```
+
+```{r}
+# library(data.table)
+# fwrite(list(vect), file = "file.csv")
+```
+

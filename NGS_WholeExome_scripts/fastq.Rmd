@@ -1,0 +1,215 @@
+---
+title: "Process FastQ Files"
+author: "Melissa El Feghali"
+date: "12/1/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true 
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ShortRead)
+R1 <- readFastq("~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/NGS_WholeExome_Pipeline/NIST7035_trimmed_R1_paired.fastq.gz")
+```
+
+
+# Extract information from header 
+```{r}
+# Get header of read 
+
+# Get header of first 5 reads 
+ShortRead::id(R1[1:5])
+
+# Get header of 2nd read only
+ShortRead::id(R1[2])
+```
+
+```{r}
+# Transform id of 100th read to vector 
+as.vector(ShortRead::id(R1[100]))
+```
+
+```{r}
+head <- as.vector(ShortRead::id(R1[100]))
+
+labels <- c("instrument", "run_number", "flowcell_ID", "lane", "tile", "x_coordinate", "y_coordinate", "read", "is_filtered", "control_number", "index_seq")
+
+a <- unlist(strsplit(head, split=":"))
+split <- unlist(strsplit(a[7], split=" "))
+vector <- append(a[1:6], split)
+vector <- append(vector, a[8:10])
+
+names(vector) <- labels
+vector 
+```
+
+# Get length of sequence 
+
+```{r}
+# Get sequences of reads 
+
+# Get sequences of first 5 reads 
+sread(R1)[1:5] 
+
+# Get sequence of 4th read only
+sread(R1)[4]
+```
+
+```{r}
+sequence <- as.vector(sread(R1)[2]) 
+length_seq <- nchar(sequence)
+```
+
+# Get Phred Scores 
+```{r}
+# Get quality in ASCII of reads
+
+# Get quality in ASCII of first 5 reads
+quality(R1)[1:5]
+
+# Get quality in ASCII of 3rd read only 
+quality(R1[3])
+```
+
+```{r}
+# Subset then convert
+# Get Phred Scores of read 
+
+# Get Phred Scores of 10th read
+as(quality(R1)[10], "matrix")[,]
+
+# Get first 12 Phred Scores of 5th read
+as(quality(R1)[5], "matrix")[,1:12]
+
+# Get 4th Phred Score of 5th read 
+as(quality(R1)[5], "matrix")[,4]
+```
+
+```{r}
+# sequence <- as.vector(sread(R1)[i]) # ith read 
+# length_seq <- nchar(sequence)
+
+quality_score <- as(quality(R1)[2], "matrix")[,]
+
+# Get mean score of read 
+mean(quality_score)
+```
+# Get average QS of reads with certain length 
+
+Write a script that allows the processing of fastq files (obtained after trimming) and that performs the following steps :
+
+1. The code should take an argument the desired length of the read 
+2. Compute the total number of reads with specified length
+3. Calculate the average score for each read of this length
+4. Return the total number of reads, and the average of each read with that length + return Tile ID
+
+```{r}
+find_avrgQS_readLength <- function(fastq_file, l)
+{
+  avg <- c()
+  count <- 0
+  for (i in 1:length(R1)){
+    sequence_vector <- as.vector(sread(fastq_file)[i])
+    length_sequence <- nchar(sequence_vector)
+    if (length_sequence == l){
+      count <- (count + 1)
+      qual_score <- as(quality(fastq_file)[i], "matrix")[,]
+      avg_qual_score <- mean(qual_score)
+      avg_qual_score <- append(avg, avg_qual_score)
+      
+      head_seq <- as.vector(ShortRead::id(fastq_file)[i])
+      labels <- c("instrument", "run_number", "flowcell_ID", "lane", "tile", "x_coordinate", "y_coordinate", "read", "is_filtered", "control_number", "index_seq")
+      
+      a <- unlist(strsplit(head_seq, split=":"))
+      split <- unlist(strsplit(a[7], split=" "))
+      vector <- append(a[1:6], split)
+      vector <- append(vector, a[8:10])
+      
+      names(vector) <- labels
+      
+      tile_id <- vector["tile"]
+      
+      print(paste0("Tile ID: ", tile_id))
+      print(paste0("Average quality score of read: ", avg_qual_score))
+    }
+  }
+  print(paste0("There are ", count))
+  print(paste0(" reads with length = ", l))
+}
+
+```
+
+# Get reads that belong to a certain tile number
+```{r}
+
+find_readindex_fromtile <- function(fastq_file, tile_num){
+  index <- c()
+  count <- 0
+  
+  for (i in 1:length(fastq_file))
+  {
+  
+    sequence_vector <- as.vector(sread(fastq_file)[i])
+    head_seq <- as.vector(ShortRead::id(fastq_file)[i])
+    labels <- c("instrument", "run_number", "flowcell_ID", "lane", "tile", "x_coordinate", "y_coordinate", "read", "is_filtered", "control_number", "index_seq")
+    
+    a <- unlist(strsplit(head_seq, split=":"))
+    split <- unlist(strsplit(a[7], split=" "))
+    vector <- append(a[1:6], split)
+    vector <- append(vector, a[8:10])
+    
+    names(vector) <- labels
+    
+    if (tile_num == vector["tile"])
+    {
+      count <- (count + 1)
+      index <- append(index, i)
+      print(paste0("Tile ID: ", tile_id))
+    }
+  }
+}
+```
+
+```{r}
+#find_readindex_fromtile(R1, 2101)
+```
+Get the indeces that need to be kept
+```{r}
+all_indx <- c(1:length(R1))
+#rmv_indx <- find_readindex_fromtile(R1, 1101)
+```
+
+Create a FASTQ file from a list of indeces of reads from another fastq file
+```{r}
+create_subsetfile <- function(fastq_file, idx){
+  r <- ShortReadQ()
+  for (i in idx){
+    r <- append(r, fastq_file[i])
+  }
+  
+  return(r)
+}
+```
+
+```{r}
+r <- create_subsetfile(R1, c(1:15))
+r
+```
+
+Writing to a fastq file
+```{r}
+# mode="w" --> write
+# mode="a" ---> append
+
+# writeFastq(r, output_path, mode="w", full=FALSE, compress=T)
+```
+
+

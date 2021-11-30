@@ -1,0 +1,396 @@
+---
+title: "NGS - Whole Exome Sequencing"
+author: "Melissa El Feghali"
+date: "11/24/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true 
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+```
+
+# First Quality Control Check
+
+Make sure that the number of lines in each read is the same (R1 & R2).
+
+```{bash}
+# If the data file is a zip file use zcat to print out content and wc -l to count the number of lines
+
+zcat file_name_R1.fasta.gz | wc -l
+zcat file_name_R2.fasta.gz | wc -l
+
+# If file is unzipped use cat instead of zcat
+```
+
+To get the number of reads in the file we have to divide the total number of lines by 4, because each read has 4 lines. 
+
+# Generate FastQC html report 
+
+```{bash}
+fastqc file_name_R1.fa.gz
+fastqc file_name_R2.fa.gz
+```
+
+# Trimming Step
+
+Check which adapter file to use and if we are using paired end reads or single end reads.
+
+```{bash}
+java -jar /Users/melissa.elfeghali/Desktop/BIF/Courses/BIF425_FuntionalGenomics/NGS_WholeExome_Pipeline/Tools/Trimmomatic-0.39/trimmomatic-0.39.jar PE -threads 10 -trimlog path_outputfile.log path_input_R1.fasta.gz path_input_R2.fasta.gz path_output_paired_R1.fasta.gz path_output_unpaired_R1.fasta.gz path_output_paired_R2.fasta.gz path_output_unpaired_R2.fasta.gz ILLUMINACLIP:/Users/melissa.elfeghali/Desktop/BIF/Courses/BIF425_FuntionalGenomics/NGS_WholeExome_Pipeline/Tools/Trimmomatic-0.39/adapters/NexteraPE-PE.fa:2:30:10 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+```
+
+Re-generate FastQC reports on paired output files. 
+
+```{bash}
+fastqc file_name_paired_R1.fa.gz
+fastqc file_name_paired_R2.fa.gz
+```
+
+# Download Reference Genome 
+
+## Sequence data per chromosome for hg38 
+
+link: https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/
+
+Use above link to download chromosme.fa.gz and associated patches using the command wget
+
+```{bash}
+# create new folder to download the reference files 
+mkdir chromsome_number
+
+wget link/chromosome.fa.gz
+
+# Unzip and concatenate chromosome and contig fasta files
+tar zvfx chromosome.fa.gz
+cat ./chromosome_number > hg38_chromosome_number.fa
+rm -r ./chromsome_number 
+
+```
+
+## Whole reference genome 
+
+```{bash}
+# download hg38 chromosome fasta files
+wget http://hgdownload.cse.ucsc.edu/goldenPath/hg38/bigZips/hg38.chromFa.tar.gz
+
+# unzip and concatenate chromosome and contig fasta files
+tar zvfx hg38.chromFa.tar.gz
+cat ./chroms/*.fa > hg38.fa
+rm –r ./chroms 
+
+```
+
+# Create Reference Index 
+
+```{bash}
+bwa index -p hg38chromnumberbwaidx -a bwtsw hg38_chromosomenumber.fa
+```
+
+-p index name (can be whatever we want)
+-a index algorithm (bwtsw for long genomes and is for short genomes)
+
+# Align to Reference Genome 
+
+```{bash}
+bwa mem -t 8 -R "@RG\tID:rg1\tSM:NA12878" hg38bwaidx NIST7035_trimmed_R1_paired.fastq.gz NIST7035_trimmed_R2_paired.fastq.gz > NIST7035_aln.sam
+```
+
+optional: -R (read group info)
+
+# SAM File Format
+
+SAM stands for Sequence Alignment Map format. The raw sequencing data can be fully recapitulated from the SAM/BAM file. 
+
+A SAM file (.sam) is a tab-delimited text file that contains sequence alignment data. 
+
+```{r}
+readxl::read_xlsx(path = "~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/Exam_NGS_WholeExome/AlignementSection.xlsx")
+```
+## Bitwise FLAG
+
+A bitflag is used to store a set of Boolean (Yes/No) values in a compact fashion. In our case, we have 12 Yes/No attributes about each read.
+
+For example a value of 99 indicates that the read has multiple segments in sequencing (usually this refers to paired-end read: 
+            Bitflag 99 = 64 + 32 + 2 + 1
+
+```{r}
+readxl::read_xlsx(path = "~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/Exam_NGS_WholeExome/BitwiseFLAG.xlsx")
+```
+For single end reads, RNEXT will be always * and PNEXT and TLEN will be 0 as the read does not have a complement paired one.
+
+Paired end reads are presented on two line. 2 fields are  used to refer to the reference sequence and position of the “next” aligned segment, RNEXT and PNEXT.
+
+- If both reads map to the same chromosome, RNEXT will be ‘=‘
+- The TLEN shows the distance between the left most and right most mapped based of a pair, if on the same chromosome. 
+- If both members of the pair are properly mapped to the forward and reverse strand, this is indicated by bitwise flag of 99 and 147, or 83 and 163. 
+
+FLAG & 0x900 ==0 is called the primary line of the read. Thus, if a read is annotated either as a secondary alignment or a supplementary alignment, then we will obtain FLAG  & 0x900 !=0.
+
+## Mapping Quality MAPQ 
+
+MAPQ = -10log10(P) with P the probability that the read is aligned to the wring position in the genome. It is rounded to the nearest integer. 
+
+If MAPQ = 255, the mapping quality is not available. 
+
+BWA assigns the read a MAPQ of zero and picks one of the positions at random when there is repetitive sequences in the genome, in other words, when a short read may align equally to two or more positions.
+
+## CIGAR String 
+
+```{r}
+readxl::read_xlsx(path = "~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/Exam_NGS_WholeExome/CIGAR_String.xlsx")
+```
+
+H can only be present as the first and/or last operation. 
+S may only have H operations between them and the ends of the CIGAR string. 
+For mRNA-to-genome alignment, an N operation represents an intron.
+
+Length(SEQ) = Sum of lengths of (M + I + S + '=' + 'X')
+
+# SAMTools & BCFTools
+
+The option –f <INT> will only output alignments with all bits set in INT present in the FLAG field. (INT can be specified as a decimal number or as a hexadecimal number)
+
+The option –F <INT> does not output alignments with any bits set in INT present in the FLAG flied. The –F option thus skips any read for which FLAG & INT != 0. 
+
+```{bash}
+# To output only primary reads 
+samtools view -F 0x900 path_to_BAMfile
+
+# To extract all of the secondary alignment read 
+samtools view -f 0x100 path_to_BAMfile
+```
+
+The flagstat function of SAMtools provides a summary of the number of records corresponding to each of the bit flags. 
+
+## Convert SAM to BAM 
+
+```{bash}
+samtools fixmate -O BAM path_to_SAMfile path_to_output_BAMfile
+```
+
+fixmate has an option -r that removes unmapped reads and secondary alignments.
+
+OR
+
+```{bash}
+samtools view -Sb path_to_SAMfile > path_to_output_BAMfile
+```
+
+## Sorting
+
+Sorting will help remove unmapped read, so sometimes the sorted file might be smaller in size than the original bam file.
+
+```{bash}
+samtools sort path_to_BAMfile > path_to_output_sortedBAMfile
+```
+
+## Calling SNPs
+
+Index the genome again 
+```{bash}
+samtools faidx path_to_reference_genome_file.fa
+```
+
+Collect summary information in the input BAMs, compute the likelihood of data given each possible genotype and store the likelihoods in the BCF format
+```{bash}
+samtools mpileup -g -f path_to_reference_genome_file.fa path_to_sortedBAMfile > path_output_raw.bcf
+```
+
+-f, --fasta-ref FILE    faidx indexed reference sequence file
+-G, --exclude-RG FILE   exclude read groups listed in FILE
+
+Generate file in VCF format
+```{bash}
+bcftools call -vmO z -o path_outpu_zipped_VCF_raw.vcf.gz path_to_raw.bcf
+```
+
+-v, --variants-only       output variant sites only
+-m, --multiallelic-caller       alternative model for multiallelic and rare-variant calling (conflicts with -c)
+-O, --output-type <b|u|z|v>     output type: 'b' compressed BCF; 'u' uncompressed BCF; 'z' compressed VCF; 'v' uncompressed VCF [v]
+-o, --output <file>    write output to a file [standard output]
+
+Index the VCF file 
+```{bash}
+tabix -p vcf path_zipped_raw.vcf.gz
+```
+
+-p, --preset STR           gff, bed, sam, vcf
+
+Generate statistics 
+```{bash}
+bcftools stats -F reference_genome.fa -s - path_to_raw.vcf.gz > path_statsFile_raw.vcf.gz.stats
+```
+
+-F, --fasta-ref <file> faidx indexed reference sequence file to determine INDEL context
+ -s, --samples <list> list of samples for sample stats, "-" to include all samples
+
+```{bash}
+mkdir plots 
+
+plot-vcfstats -p plots/ path_statsFile_raw.vcf.gz.stats
+```
+
+-p, --prefix <dir>  Output directory.
+
+# Post-processing the alignment 
+
+The raw alignments we obtained from BWA-MEM are not ready for downstream analysis and require several post-processing steps. 
+
+We will use the Picard Tools suite to validate the BAM file, sort the reads according to their genomic location, mark or remove duplicate reads, and index the BAM file. 
+
+## Picard Tools
+
+Picard Tools suite is designed to work with the GATK variant calling software. It can be used to manipulate different NGS data formats such as SAM/BAM and VCF. 
+
+The following command will show you a help page of picard
+```{bash}
+java –jar picard.jar –h
+
+# Make sure you are doing this command from the directory containing the .jar file :  ~/Desktop/BIF/Courses/BIF425_FuntionalGenomics/NGS_WholeExome_Pipeline/Tools/
+```
+
+Picard contains numerous tools, each of which can be invoked with a command in the following scheme: 
+
+```{bash}
+java jvm-args –jar picard.jar PicardToolName OPTION1=value1 OPTION2=value2 …
+```
+
+The Java Virtual Machine argument (jvm-args) control aspects such as memory usage. For instance –Xmx8g –Xms2g would start the Java virtual machine with 2GB and allow it to use a maximum of 8GB memory. 
+
+## Validate the SAM/BAM file
+
+```{bash}
+java -jar picard.jar ValidateSamFile INPUT=path_BAMFile MODE=SUMMARY
+
+# or directly use GATK 
+
+gatk ValidateSamFile -I path_BAMfile -MODE SUMMARY 
+```
+
+## Sorting 
+
+```{bash}
+java -jar picard.jar SortSam INPUT=path_BAMfile OUTPUT=path_sorted.bam SORT_ORDER=coordinate
+
+# or directly use GATK
+
+gatk SortSam -I path_BAMfile -O path_sorted.bam -SORT_ORDER coordinate
+```
+
+## Mark Duplicates 
+
+PICARD can mark, and optionally remove, duplicate reads from sorted BAM files. 
+
+The MarkDuplicates tool works by comparing sequences with identical 5’ positions. Reads with identical 5’ positions and identical sequences are marked as duplicates. 
+
+```{bash}
+java -jar picard.jar MarkDuplicates INPUT=path_sorted.bam OUTPUT=path_dedup.bam METRICS_FILE=path_file.metrics
+
+# or directly use GATK
+
+gatk MarkDuplicates -I path_sorted.bam -O path_dedup.bam -METRICS_FILE path_file.metrics
+```
+
+Running MarkDuplicates will generate a file similar to the initial one but will modify the bitfield in the SAM file (0x400 bit is set to 1) 
+
+We can check the result by using samtools to view the BAM file. 
+To display only the records with the bitflag bit 0x400:
+```{bash}
+samtools view -f 0x400 path_dedup.bam 
+```
+
+We can use the -c option to count the matching entries without printing them 
+```{bash}
+samtools view -c -f 0x400 path_dedup.bam
+```
+
+To get the number of sequence lines in the BAM file using the following:
+```{bash}
+samtools view –c –F 0x100 NIST7035_dedup.bam
+```
+The –F 0x100 flag filters our alignments that are not the primary alignment.
+
+# GATK
+
+## Realignment 
+
+The alignment of reads by BWA-MEM is done read-by-read, and many tend to accumulate erroneous SNV calls near true insertions and deletions, due to misalignment. Mainly because alignment algorithms penalize mismatches less than gaps. 
+
+The IndelRealigner module of GATK performs a second pass over BAM file and corrects some of the errors by performing a local realignment of reads around candidate indels. 
+
+This two-step indel realignment process first identifies such regions where alignments may potentially be improved, then realigns the reads in these regions using a consensus model that takes all reads in the alignment context together.
+
+```{bash}
+java -jar picard.jar CreateSequenceDictionary R=reference.fa O=reference.dict
+
+# Or directly use GATK
+
+gatk CreateSequenceDictionary -R reference.fa -O reference.dict
+```
+
+## Base Quality Score Recalibration 
+
+NGS provides estimates of base quality for each sequence based on Phred-scaled quality scores that reflect the likelihood that the base call is erroneous.
+
+The reported quality scores may be inaccurate as the result of systematic biases.
+
+The base recalibration process involves two key steps: 
+
+1- BaseRecalibrator tool builds a model of covariation based on the input data and a set of known variants, producing a recalibaryion file. 
+
+2- ApplyBQSR tool adjusts the base quality scores in the data based on the model, producing a new BAM file. 
+
+Outside the masked sites, every mismatch is counted as an error. 
+
+```{bash}
+gatk BaseRecalibrator -I path_dedup.bam -R path_reference.fa --known-sites All_20180418.vcf.gz -O recal_data.table
+```
+
+Recalibrate the base qualities of the input reads based on the recalibration table produced by the BaseRecalibrator tool, and outputs a recalibrated BAM or CRAM file. 
+
+```{bash}
+gatk ApplyBQSR -R path_reference.fa -I path_dedup.bam --bqsr-recal-file recal_data.table -O output_recal.bam
+```
+
+We need to generate a second pass recalibration table in order to analyze the biases in the recalibrated data. 
+
+```{bash}
+gatk -T BaseRecalibrator -R reference.fa -I output_recal.bam -knownSites All_20180418.vcf.gz -bqsr recal_data.table -o recal_secondpass.table
+```
+
+### Generate plots 
+
+We can generate a plot to look at the summary of one table 
+```{bash}
+gatk AnalyzeCovariates -bqsr recal_data.table -plots AnalyzeCovariates.pdf
+```
+
+To compare two tables
+```{bash}
+gatk AnalyzeCovariates -before recal_data.table -after recal_secondpass.table -plots AnalyzeCovariates.pdf 
+```
+
+## Variant Calling
+
+HaplotypeCaller can be used for single-sample or multiple-sample anaylsis. The program encounters a region showing signs of variation, it discards the existing mapping information and completely reassembles the reads in that region. 
+
+Single-sample GVCF callings (intermediate output)
+```{bash}
+gatk --java-options "-Xmx4g" HaplotypeCaller -R reference.fa -I output_recal.bam -O output_recal.g.vcf.gz -ERC GVCF
+```
+
+Perform joint genotyping 
+```{bash}
+gatk --java-options "-Xmx4g" GenotypeGVCFs -R reference.fa -V output_recal.g.vcf.gz -O final_output.vcf.gz
+```
+

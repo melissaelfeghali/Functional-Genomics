@@ -1,0 +1,204 @@
+---
+title: "Process SAM/BAM Files"
+author: "Melissa El Feghali"
+date: "12/1/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true 
+    theme: flatly
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Rsamtools Package use 
+```{r}
+#load library
+library(Rsamtools)
+
+#read in entire BAM file
+
+bam_file <- "~/Desktop/toy.bam"
+  
+bam <- scanBam(bam_file)
+```
+
+```{r}
+aln <- bam[[1]]
+names(aln)
+```
+
+```{r}
+lapply(aln, function(xx) xx[1])
+```
+
+```{r}
+# Get all CIGAR strings of BAM file
+aln$cigar
+
+# Get CIGAR string of specific read
+aln$cigar[300]
+
+# Get CIGAR string of first 10 reads
+aln$cigar[1:10]
+```
+
+```{r}
+# Get number of read with bitflag > 99 
+sum(aln$flag > 99)
+```
+
+# How many alignments does the BAM file contain ?
+```{bash}
+# samtools flagstat bam_file 
+
+#or 
+
+samtools view ~/Desktop/toy.bam | wc -l
+```
+
+If the BAM file was created with a tool that includes unmapped reads into the BAM file, we would need to exclude the lines representing unmapped reads, i.e. with a “*” in column 3 (chrom)
+```{bash}
+samtools view ~/Desktop/toy.bam | cut -f 3 | grep -v '*' | wc -l
+```
+
+# How many alignments show the read’s mate unmapped ?
+
+An alignment with an unmapped mate is marked with a ‘*’ in column 7.
+```{bash}
+samtools view ~/Desktop/toy.bam  | cut -f 7 | grep -c '*'
+```
+
+# How many alignments contain a deletion (D) ?
+
+Deletions are be marked with the letter ‘D’ in the CIGAR string for the alignment, shown in column 6
+```{bash}
+samtools view ~/Desktop/toy.bam  | cut -f 6 | grep -c 'D'
+```
+
+# How many alignments show the read’s mate mapped to the same chromosome?
+
+```{bash}
+samtools view ~/Desktop/toy.bam  | cut -f 7 | grep -c '='
+```
+
+# How many alignments are spliced ?
+
+A spliced alignment will be marked with an “N” (intron gap) in the CIGAR field (column 6)
+```{bash}
+samtools view ~/Desktop/toy.bam  | cut -f 6 | grep -c 'N'
+```
+
+# How many sequence are in the genome file ?
+
+This information can be found in the header of the BAM file. The number of lines describing the sequences in the reference genome.
+```{bash}
+samtools view -H ~/Desktop/toy.bam  | grep -c "SN:"
+```
+
+# What is the length of the first sequence in the genome file?
+
+```{bash}
+samtools view -H ~/Desktop/toy.bam  | grep "SN:" | more
+```
+
+# What alignment tool was used?
+
+The program name is listed in the @PG line in the BAM header (pattern “ID:program_name”).
+```{bash}
+samtools view -H ~/Desktop/toy.bam  | grep "^@PG"
+```
+
+# Extract a subregion from the BAM file.
+
+Extract 1,000,000 to 10,000,000 on chromsome 3.
+```{bash}
+echo "Chr3 1000000 10000000" > ~/Desktop/region.bed
+
+samtools view -b -L ~/Desktop/region.bed ~/Desktop/toy.bam  > ~/Desktop/test_region.bam
+```
+
+# Analyze CIGAR string for indels (insertions or deletions)
+
+Suppose we want to know how many alignments included insertions or deletions (indels) versus the reference. 
+
+```{bash}
+samtools view ~/Desktop/toy.bam  | cut -f 6 | grep -c -E 'I|D'
+# X = 341073
+```
+
+What is that in terms of the rate of indels? For that we need to count the total number of mapped reads.
+```{bash}
+samtools view -c -F 0x4 ~/Desktop/toy.bam 
+# Y = 35202340
+```
+
+Knowing these two numbers we can just divide them
+```{bash}
+awk 'BEGIN{ print 100*341073/35202340,"%" }'
+
+# X is the result of the first above command 
+# Y is the result of the second above command 
+
+# 0.968893 %
+```
+
+# Filtering by location range 
+
+Sometimes you just want to examine a subset of reads in detail. Once you have a sorted and indexed BAM, you can use the coordinate filtering options of samtools view to do this.
+
+```
+# count the number of reads mapped to chromosome 2 (chrII)
+samtools view -c -F 0x4 ~/Desktop/toy.bam  chrII
+
+# count the number of reads mapped to chromosomes 1 or M (chrI, chrM)
+samtools view -c -F 0x4 ~/Desktop/toy.bam  chrI chrM
+
+# count the number of reads mapped to chromosomes 1 that overlap coordinates 1000-2000
+samtools view -c -F 0x4 ~/Desktop/toy.bam  chrI:1000-2000
+
+# since there are only 20 reads in the chrI:1000-2000 region, examine them individually
+samtools view -F 0x4 ~/Desktop/toy.bam  chrI:1000-2000
+
+# look at a subset of field for chrI:1000-2000 reads
+#   2=flags, 3=contig, 4=start, 5=mapping quality, 6=CIGAR, 9=insert size
+samtools view -F 0x4 ~/Desktop/toy.bam  chrI:1000-2000 | cut -f 2-6,9
+```
+
+# Filtering high-quality reads
+
+Exercise:  Use samtools view with -F, -f and -q options to create a BAM containing only mapped, properly paired, high-quality (mapQ 20+) reads. 
+
+```{bash}
+samtools view -F 0x04 -f 0x2 -q 20 -b ~/Desktop/toy.bam   > ~/Desktop/sorted_filtered.bam
+
+# or
+
+# samtools view -F 0x04 -f 0x2 -q 20 -b -o sorted_filtered.bam bam_file
+```
+
+Exercise: How many records are in the filtered BAM compared to the original? How many read pairs does this represent?
+
+```{bash}
+samtools view -c ~/Desktop/toy.bam  # returns X
+samtools view -c ~/Desktop/sorted_filtered.bam # returns Y
+```
+
+There were X alignment records in the original BAM, and only Y in the quality-filtered BAM, around --% of our starting reads.
+Since we have only properly paired reads, the filtered BAM will contain equal numbers of both R1s and R2s. So the number of read pairs is Y/2. 
+
+Exercise: If our original BAM contained secondary reads, (0x100 = 1) how would we exclude those also?
+
+```{bash}
+samtools view -b -F 0x104 -f 0x2 -q 20 -o ~/Desktop/sorted_filtered_2.bam ~/Desktop/toy.bam 
+
+#or
+
+# samtools view -b -F 0x104 -f 0x2 -q 20 ~/Desktop/toy.bam  > ~/Desktop/sorted_filtered_2.bam
+```
+
